@@ -9,6 +9,6 @@ revm = { workspace = true }
 tokio = { workspace = true }
 dotenv = { workspace = true }
 eyre = { workspace = true }
-mev_core = { workspace = true }
+mev-core = { workspace = true }
 mev-analysis = { workspace = true }
 clap = { workspace = true }

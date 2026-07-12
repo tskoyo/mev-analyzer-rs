@@ -25,9 +25,6 @@ async fn main() -> Result<()> {
     let provider = ProviderBuilder::new().connect(&rpc_url).await?;
     let bot: Address = "0xE08D97e151473A848C3d9CA3f323Cb720472D015".parse()?;
 
-    // Pull the full block: we need every preceding tx to replay (in case any
-    // of them moved the pools our target tx trades against) and the header
-    // fields BlockEnv needs (basefee, timestamp, coinbase, ...).
     let block = provider
         .get_block_by_number(BlockNumberOrTag::Number(TARGET_BLOCK))
         .full()
@@ -53,9 +50,6 @@ async fn main() -> Result<()> {
         txs.len()
     );
 
-    // eth_getStorageAt/eth_getBalance at block N return state AFTER block N
-    // fully executed. Since our target tx is IN block N, we fork one block
-    // earlier to get the state right before block N's first tx runs.
     let fork_point = BlockId::number(TARGET_BLOCK - 1);
     let alloy_db = WrapDatabaseAsync::new(AlloyDB::new(provider, fork_point))
         .ok_or_else(|| eyre!("failed to build AlloyDB"))?;
@@ -66,9 +60,6 @@ async fn main() -> Result<()> {
         .modify_block_chained(|b| *b = block_env_from_rpc(&block))
         .build_mainnet();
 
-    // Replay every tx ahead of ours in the block, folding each one's state
-    // changes back into the shared CacheDB before moving to the next, so the
-    // pools our target tx touches are in their exact pre-attack state.
     for (i, tx) in txs[..target_index].iter().enumerate() {
         let result = evm.transact(tx_env_from_rpc(tx))?;
         if !result.result.is_success() {
@@ -80,7 +71,6 @@ async fn main() -> Result<()> {
         evm.db_mut().commit(result.state);
     }
 
-    // Now execute the attack tx itself on top of the replayed state.
     let target_tx = &txs[target_index];
     let result = evm.transact(tx_env_from_rpc(target_tx))?;
 
@@ -105,7 +95,6 @@ async fn main() -> Result<()> {
         meta.insert(token, (symbol, decimals));
     }
 
-    // --- print with names + human-readable amounts ---
     println!("--- ERC-20 transfers ---");
     for t in &transfers {
         let (symbol, decimals) = &meta[&t.token];

@@ -2969,7 +2969,7 @@ dependencies = [
  "alloy",
  "dotenv",
  "eyre",
- "mev_core",
+ "mev-core",
  "revm",
  "tokio",
 ]
@@ -2983,13 +2983,13 @@ dependencies = [
  "dotenv",
  "eyre",
  "mev-analysis",
- "mev_core",
+ "mev-core",
  "revm",
  "tokio",
 ]
 
 [[package]]
-name = "mev_core"
+name = "mev-core"
 version = "0.1.0"
 dependencies = [
  "alloy",

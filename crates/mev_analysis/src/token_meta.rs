@@ -5,11 +5,6 @@ use revm::context::TxEnv;
 use revm::context::result::{ExecutionResult, Output};
 use revm::primitives::TxKind;
 
-/// `call` runs a `TxEnv` against whatever forked EVM the caller is holding
-/// and returns its `ExecutionResult` (or `None` on a transact error). Taking
-/// a closure instead of the EVM itself keeps this function decoupled from
-/// revm's `Evm<...>` generic parameters, which are awkward to name across a
-/// crate boundary.
 pub fn fetch_token_meta(
     mut call: impl FnMut(TxEnv) -> Option<ExecutionResult>,
     token: Address,

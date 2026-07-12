@@ -10,5 +10,5 @@ dotenv = "0.15.0"
 eyre = "0.6"
 revm = { version = "41.0.0", features = ["alloydb"] }
 clap = { version = "4", features = ["derive"] }
-mev_core = { path = "crates/mev_core" }
+mev-core = { path = "crates/mev_core" }
 mev-analysis = { path = "crates/mev_analysis" }

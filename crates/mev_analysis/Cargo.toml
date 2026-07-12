@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 alloy = { workspace = true }
 revm = { workspace = true }
-mev_core = { workspace = true }
+mev-core = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
