@@ -4,11 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-alloy = { workspace = true }
-revm = { workspace = true }
-mev-core = { workspace = true }
-
-[dev-dependencies]
-tokio = { workspace = true }
-dotenv = { workspace = true }
-eyre = { workspace = true }
+alloy.workspace = true
+revm.workspace = true
+mev-core.workspace = true
+tokio.workspace = true
+dotenv.workspace = true
+eyre.workspace = true

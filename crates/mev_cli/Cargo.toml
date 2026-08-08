@@ -11,4 +11,4 @@ dotenv = { workspace = true }
 eyre = { workspace = true }
 mev-core = { workspace = true }
 mev-analysis = { workspace = true }
-clap = { workspace = true }
+clap = { version = "4", features = ["derive"] }
