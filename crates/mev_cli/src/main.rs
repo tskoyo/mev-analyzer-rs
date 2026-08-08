@@ -1,158 +1,178 @@
-// use std::collections::HashMap;
+#[derive(Clone)]
+struct Pool {
+    name: &'static str,
+    usdc: f64, // reserve of USDC
+    weth: f64, // reserve of WETH
+    fee: f64,  // swap fee taken off the input, e.g. 0.003 = 0.30%
+}
 
-// use alloy::eips::{BlockId, BlockNumberOrTag};
-// use alloy::network::TransactionResponse;
-// use alloy::primitives::utils::format_units;
-// use alloy::primitives::{Address, B256};
-// use alloy::providers::{Provider, ProviderBuilder};
-// use clap::Parser;
-// use dotenv::dotenv;
-// use eyre::{Result, eyre};
-// use mev_analysis::{decode_transfers, fetch_token_meta, net_balance_changes};
-// use mev_core::{block_env_from_rpc, tx_env_from_rpc};
-// use revm::context::ContextTr;
-// use revm::database::{AlloyDB, CacheDB};
-// use revm::database_interface::{DatabaseCommit, WrapDatabaseAsync};
-// use revm::{Context, ExecuteEvm, MainBuilder, MainContext};
+impl Pool {
+    /// Spot price of 1 WETH in USDC is just the ratio of reserves. This single
+    /// number is what a bot mirrors across many pools. When two pools holding the
+    /// same pair disagree on it, THAT disagreement is the arbitrage opportunity.
+    /// This is "detection": not magic, just comparing ratios.
+    fn weth_price(&self) -> f64 {
+        self.usdc / self.weth
+    }
 
-// /// Replay a transaction on a forked EVM and report ERC-20 transfers plus the
-// /// net balance change for a given address.
-// #[derive(Parser)]
-// struct Args {
-//     /// Transaction hash to investigate
-//     #[arg(long)]
-//     tx: String,
+    /// The exact constant-product swap the pool contract runs: put `amount_in` of
+    /// the input token in, receive some output token out. Fee is taken off the
+    /// input first, then x*y=k determines the output. Crucially: the more you put
+    /// in, the worse your marginal rate gets — because your own trade moves the
+    /// reserves. That self-inflicted price movement is "price impact" / slippage.
+    fn amount_out(&self, amount_in: f64, reserve_in: f64, reserve_out: f64) -> f64 {
+        let in_with_fee = amount_in * (1.0 - self.fee);
+        (in_with_fee * reserve_out) / (reserve_in + in_with_fee)
+    }
 
-//     /// Block number the transaction was mined in
-//     #[arg(long)]
-//     block: u64,
+    fn usdc_to_weth(&self, usdc_in: f64) -> f64 {
+        self.amount_out(usdc_in, self.usdc, self.weth)
+    }
+    fn weth_to_usdc(&self, weth_in: f64) -> f64 {
+        self.amount_out(weth_in, self.weth, self.usdc)
+    }
+}
 
-//     /// Address whose net balance change should be reported
-//     #[arg(long)]
-//     bot: Address,
-// }
+/// The cyclic arb itself: start with `usdc_in`, buy WETH where it's cheap, sell
+/// that WETH where it's expensive, end holding USDC again. Returns final USDC.
+/// On-chain this is ONE transaction to ONE contract doing both legs atomically.
+fn run_arb(usdc_in: f64, cheap: &Pool, expensive: &Pool) -> f64 {
+    let weth = cheap.usdc_to_weth(usdc_in); // leg 1: USDC -> WETH  (cheap pool)
+    expensive.weth_to_usdc(weth) // leg 2: WETH -> USDC  (expensive pool)
+}
 
-// #[tokio::main]
-// async fn main() -> Result<()> {
-//     dotenv().ok();
-//     let args = Args::parse();
+/// Gross profit in USDC for a given input size, before gas.
+fn gross_profit(usdc_in: f64, cheap: &Pool, expensive: &Pool) -> f64 {
+    run_arb(usdc_in, cheap, expensive) - usdc_in
+}
 
-//     let rpc_url = std::env::var("ALCHEMY_RPC_URL").expect("ALCHEMY_RPC_URL must be set in .env");
-//     let provider = ProviderBuilder::new().connect(&rpc_url).await?;
+/// Find the input size that MAXIMIZES profit. This is the part naive explanations
+/// skip entirely. You do NOT trade as much as possible: past a point, your own
+/// price impact eats the spread faster than you capture it, and profit falls.
+/// The profit curve is concave (rises, peaks, falls), so we ternary-search it.
+/// The peak is where marginal spread captured == marginal price impact paid.
+fn optimal_input(cheap: &Pool, expensive: &Pool, mut lo: f64, mut hi: f64) -> f64 {
+    for _ in 0..200 {
+        let m1 = lo + (hi - lo) / 3.0;
+        let m2 = hi - (hi - lo) / 3.0;
+        if gross_profit(m1, cheap, expensive) < gross_profit(m2, cheap, expensive) {
+            lo = m1;
+        } else {
+            hi = m2;
+        }
+    }
+    (lo + hi) / 2.0
+}
 
-//     let target_hash: B256 = args
-//         .tx
-//         .parse()
-//         .map_err(|_| eyre!("invalid tx hash {}", args.tx))?;
+/// Gas cost of executing the arb, expressed in USDC so it sits in the same units
+/// as profit. This single term is what turns most "opportunities" into traps.
+fn gas_cost_usdc(gas_used: f64, gas_price_gwei: f64, eth_price_usdc: f64) -> f64 {
+    let eth_spent = gas_used * gas_price_gwei * 1e-9; // gwei * gas -> ETH
+    eth_spent * eth_price_usdc
+}
 
-//     // Pull the full block: we need every preceding tx to replay (in case any
-//     // of them moved the pools our target tx trades against) and the header
-//     // fields BlockEnv needs (basefee, timestamp, coinbase, ...).
-//     let block = provider
-//         .get_block_by_number(BlockNumberOrTag::Number(args.block))
-//         .full()
-//         .await?
-//         .ok_or_else(|| eyre!("block {} not found", args.block))?;
+fn analyze(label: &str, cheap: &Pool, expensive: &Pool, gas_used: f64, gas_price_gwei: f64) {
+    let eth_price = expensive.weth_price(); // good-enough numeraire for gas conversion
+    println!("=== {label} ===");
+    println!(
+        "  {}: 1 WETH = {:>9.2} USDC",
+        cheap.name,
+        cheap.weth_price()
+    );
+    println!(
+        "  {}: 1 WETH = {:>9.2} USDC",
+        expensive.name,
+        expensive.weth_price()
+    );
+    let spread = expensive.weth_price() - cheap.weth_price();
+    println!(
+        "  price gap : {:>9.2} USDC/WETH  ({:.3}%)  <- this is what 'detection' spots",
+        spread,
+        100.0 * spread / cheap.weth_price()
+    );
 
-//     let txs = block
-//         .transactions
-//         .as_transactions()
-//         .ok_or_else(|| eyre!("block was not fetched with full transactions"))?;
+    println!(
+        "\ngross profit vs. trade size (watch it rise, peak, then FALL — that's price impact):"
+    );
+    for &dx in &[5_000.0, 25_000.0, 75_000.0, 150_000.0, 300_000.0, 600_000.0] {
+        println!(
+            "     put in {:>10.0} USDC  ->  gross profit {:>11.2} USDC",
+            dx,
+            gross_profit(dx, cheap, expensive)
+        );
+    }
 
-//     let target_index = txs
-//         .iter()
-//         .position(|tx| tx.tx_hash() == target_hash)
-//         .ok_or_else(|| eyre!("tx {target_hash} not found in block {}", args.block))?;
+    let best_in = optimal_input(cheap, expensive, 0.0, cheap.usdc.min(expensive.usdc));
+    let gross = gross_profit(best_in, cheap, expensive);
+    let gas = gas_cost_usdc(gas_used, gas_price_gwei, eth_price);
+    let net = gross - gas;
 
-//     println!(
-//         "{target_hash} is #{target_index} of {} txs in block {}",
-//         txs.len(),
-//         args.block
-//     );
-
-//     // eth_getStorageAt/eth_getBalance at block N return state AFTER block N
-//     // fully executed. Since our target tx is IN block N, we fork one block
-//     // earlier to get the state right before block N's first tx runs.
-//     let fork_point = BlockId::number(args.block - 1);
-//     let alloy_db = WrapDatabaseAsync::new(AlloyDB::new(provider, fork_point))
-//         .ok_or_else(|| eyre!("failed to build AlloyDB"))?;
-//     let cache_db = CacheDB::new(alloy_db);
-
-//     let mut evm = Context::mainnet()
-//         .with_db(cache_db)
-//         .modify_block_chained(|b| *b = block_env_from_rpc(&block))
-//         .build_mainnet();
-
-//     // Replay every tx ahead of ours in the block, folding each one's state
-//     // changes back into the shared CacheDB before moving to the next, so the
-//     // pools our target tx touches are in their exact pre-attack state.
-//     for (i, tx) in txs[..target_index].iter().enumerate() {
-//         let result = evm.transact(tx_env_from_rpc(tx))?;
-//         if !result.result.is_success() {
-//             println!(
-//                 "warning: preceding tx #{i} ({:?}) did not succeed",
-//                 tx.tx_hash()
-//             );
-//         }
-//         evm.db_mut().commit(result.state);
-//     }
-
-//     // Now execute the target tx itself on top of the replayed state.
-//     let target_tx = &txs[target_index];
-//     let result = evm.transact(tx_env_from_rpc(target_tx))?;
-
-//     println!("--- execution result ---");
-//     println!("success: {}", result.result.is_success());
-//     println!("gas used: {}", result.result.tx_gas_used());
-//     println!("logs: {}", result.result.logs().len());
-
-//     let transfers = decode_transfers(result.result.logs());
-//     drop(result);
-
-//     let net = net_balance_changes(&transfers, args.bot);
-
-//     let mut meta: HashMap<Address, (String, u8)> = HashMap::new();
-//     for t in &transfers {
-//         if meta.contains_key(&t.token) {
-//             continue;
-//         }
-//         let token = t.token;
-//         let (symbol, decimals) =
-//             fetch_token_meta(|tx| evm.transact(tx).ok().map(|r| r.result), token);
-//         meta.insert(token, (symbol, decimals));
-//     }
-
-//     // --- print with names + human-readable amounts ---
-//     println!("--- ERC-20 transfers ---");
-//     for t in &transfers {
-//         let (symbol, decimals) = &meta[&t.token];
-//         let human = format_units(t.amount, *decimals).unwrap_or_else(|_| t.amount.to_string());
-//         println!(
-//             "#{:>2}  {} -> {}  {} {:>2}",
-//             t.idx, t.from, t.to, human, symbol
-//         );
-//     }
-
-//     println!("--- net balance change for bot {} ---", args.bot);
-//     for (token, delta) in &net {
-//         let (symbol, decimals) = &meta[token];
-//         // format_units works on unsigned; handle the sign yourself
-//         let sign = if delta.is_negative() { "-" } else { "+" };
-//         let mag = delta.unsigned_abs();
-//         let human = format_units(mag, *decimals).unwrap_or_else(|_| mag.to_string());
-//         println!("  {sign}{human} {symbol}");
-//     }
-
-//     Ok(())
-// }
+    println!(
+        "\n  OPTIMAL trade size : {:>11.2} USDC   <- solved, not guessed",
+        best_in
+    );
+    println!("  gross profit       : {:>11.2} USDC", gross);
+    println!(
+        "  gas cost           : {:>11.2} USDC   ({:.0} gas @ {:.0} gwei, ETH=${:.0})",
+        gas, gas_used, gas_price_gwei, eth_price
+    );
+    println!("----------------------------------");
+    println!("NET profit: {:>11.2} USDC", net);
+    if net > 0.0 {
+        println!("DECISION: EXECUTE ✅   submit the transaction");
+    } else {
+        println!("DECISION: SKIP ❌      the on-chain require(profit>0) would REVERT;");
+        println!("submitting anyway only burns the gas above for nothing");
+    }
+    println!();
+}
 
 fn main() {
-    let words = vec!["hello world", "foo bar"];
+    println!("\nARBITRAGE UNDER THE HOOD — the off-chain math, before any EVM\n");
 
-    let chars: Vec<&str> = words
-        .into_iter()
-        .flat_map(|w| w.split_whitespace())
-        .collect();
+    // SCENARIO 1: a fat price gap. WETH is meaningfully cheaper on Pool A.
+    // A clear, profitable arb even after gas.
+    let a = Pool {
+        name: "Pool A (Uniswap)",
+        usdc: 3_000_000.0,
+        weth: 1000.0,
+        fee: 0.003,
+    };
+    let b = Pool {
+        name: "Pool B (Sushi)",
+        usdc: 3_150_000.0,
+        weth: 1000.0,
+        fee: 0.003,
+    };
+    analyze(
+        "SCENARIO 1: fat gap — genuinely profitable",
+        &a,
+        &b,
+        180_000.0,
+        10.0,
+    );
 
-    println!("Chars: {chars:?}");
+    // SCENARIO 2: a real but THIN gap, during a high-gas moment. There IS a
+    // positive-gross arb here — a naive bot fires on it and loses money, because
+    // gas exceeds the profit. This is failure-mode #2 from the project doc, in
+    // miniature: the calculation that SHOULD stop you is the net-of-gas check.
+    let c = Pool {
+        name: "Pool C (Uniswap)",
+        usdc: 3_000_000.0,
+        weth: 1000.0,
+        fee: 0.003,
+    };
+    let d = Pool {
+        name: "Pool D (Sushi)",
+        usdc: 3_025_000.0,
+        weth: 1000.0,
+        fee: 0.003,
+    };
+    analyze(
+        "SCENARIO 2: thin gap + high gas — the trap that bleeds naive bots",
+        &c,
+        &d,
+        180_000.0,
+        45.0,
+    );
 }

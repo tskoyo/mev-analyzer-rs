@@ -12,7 +12,7 @@ use mev_core::{block_env_from_rpc, tx_env_from_rpc};
 use revm::context::ContextTr;
 use revm::database::{AlloyDB, CacheDB};
 use revm::database_interface::{DatabaseCommit, WrapDatabaseAsync};
-use revm::{Context, ExecuteEvm, MainBuilder, MainContext, SystemCallEvm};
+use revm::{Context, ExecuteEvm, MainBuilder, MainContext};
 
 const TARGET_TX: &str = "0x27f702b2f5d713ef57c76c4242e29eb550ee8f3fb6661295a144f1d3c7e1158f";
 const TARGET_BLOCK: u64 = 25336670;
