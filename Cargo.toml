@@ -3,11 +3,14 @@ resolver = "2"
 members = ["crates/*"]
 
 [workspace.dependencies]
-alloy = { version = "2.1.1", features = ["full"] }
-tokio = { version = "1.52.3", features = ["full"] }
+alloy = { version = "2.4.1", features = ["full"] }
+tokio = { version = "1.53.1", features = ["full"] }
 env_logger = "0.11.11"
 dotenv = "0.15.0"
-eyre = "0.6"
+eyre = "0.6.14"
 revm = { version = "41.0.0", features = ["alloydb"] }
+anyhow = "1.0.104"
+
+# Internal dependencies
 mev-core = { path = "crates/mev_core" }
 mev-analysis = { path = "crates/mev_analysis" }

@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 alloy.workspace = true
+anyhow.workspace = true
 revm.workspace = true
 mev-core.workspace = true
 tokio.workspace = true
