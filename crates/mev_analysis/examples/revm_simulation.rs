@@ -35,8 +35,8 @@ macro_rules! read_balance {
             ..Default::default()
         };
 
-        let out = $evm.transact_commit(call)?; // note: transact, NOT transact_commit
-        let bytes = out
+        let result = $evm.transact_commit(call)?; // note: transact, NOT transact_commit
+        let bytes = result
             .output()
             .ok_or_else(|| anyhow!("balanceOf returned nothing"))?;
         U256::from_be_slice(bytes.as_ref())
