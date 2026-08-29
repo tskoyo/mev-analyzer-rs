@@ -5,9 +5,9 @@
 A pipeline for finding real (not apparent) arbitrage opportunities on Ethereum-family
 chains, and simulating them precisely enough to trust the numbers.
 
-Three stages, each doing what it's good at:
+We have three stages:
 
-1. **Dune (SQL)** — cheap, slow, wide discovery. Scan `dex.trades` across chains to
+1. **Dune (SQL)** — scan `dex.trades` across chains to
    shortlist tokens with multiple active pools on the same chain. Never trusted for
    final numbers — only for "what should we look at."
 2. **Rust (live RPC)** — cheap, fast, narrow confirmation. Read live pool reserves
