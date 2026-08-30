@@ -46,6 +46,7 @@ impl DuneClient {
     }
 
     async fn execute(&self, query_id: u64, params: &HashMap<String, String>) -> Result<String> {
+        println!("executing dune query {query_id} with params {params:?}...");
         let url = format!("{BASE_URL}/query/{query_id}/execute");
         let resp: ExecuteResponse = self
             .http
@@ -53,10 +54,12 @@ impl DuneClient {
             .header("X-Dune-API-Key", &self.api_key)
             .json(&serde_json::json!({ "query_parameters": params }))
             .send()
-            .await?
+            .await
+            .map_err(|e| eyre::eyre!("failed to send execute request: {e}"))?
             .error_for_status()?
             .json()
-            .await?;
+            .await
+            .map_err(|e| eyre::eyre!("failed to parse execute response: {e}"))?;
         Ok(resp.execution_id)
     }
 
@@ -98,10 +101,6 @@ impl DuneClient {
             .json()
             .await?;
         Ok(resp.result.rows)
-    }
-
-    pub async fn run_query<T: DeserializeOwned>(&self, query_id: u64) -> Result<Vec<T>> {
-        self.run_query_with_params(query_id, &HashMap::new()).await
     }
 
     pub async fn run_query_with_params<T: DeserializeOwned>(
