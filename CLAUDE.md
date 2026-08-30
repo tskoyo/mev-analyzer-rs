@@ -5,30 +5,50 @@
 A pipeline for finding real (not apparent) arbitrage opportunities on Ethereum-family
 chains, and simulating them precisely enough to trust the numbers.
 
-We have three stages:
+We have four stages:
 
 1. **Dune (SQL)** — scan `dex.trades` across chains to
    shortlist tokens with multiple active pools on the same chain. Never trusted for
    final numbers — only for "what should we look at."
 2. **Rust (live RPC)** — cheap, fast, narrow confirmation. Read live pool reserves
    via `getReserves()` to check whether a Dune candidate is actually deep enough to
-   matter, before spending simulation budget on it.
-3. **REVM (exact)** — expensive, precise, ground truth. Fork mainnet state at a
+   matter, and whether a real 2-leg or 3-leg loop exists, before spending
+   simulation budget on it.
+3. **Safety scoring** — before the expensive simulation runs, a cheap REVM
+   buy/sell probe plus contract-age/holder-concentration checks screen out
+   honeypots, undisclosed transfer taxes, and fresh rugs. Trade-history
+   aggregates and live reserves alone can't see this — only real execution
+   semantics can.
+4. **REVM (exact)** — expensive, precise, ground truth. Fork mainnet state at a
    specific block and actually execute swaps to get the real output amount —
    including effects no formula captures (transfer taxes, proxy quirks, exact gas).
 
 Nothing is trusted until it's confirmed at the REVM layer. Dune volume numbers in
 particular are not to be treated as evidence of anything — see rules below.
 
+Full pipeline design, stage-by-stage detail, and current scope boundaries live in
+[`ARCHITECTURE.md`](./ARCHITECTURE.md). This file stays focused on the rules and
+validation discipline that every stage has to satisfy.
+
 ## Workspace layout
 
-- `crates/mev-analysis` — Dune queries, candidate filtering, orchestration
-- `crates/<pool-watch or similar>` — live reserve polling, `getReserves()` calls,
-  price-gap logging
-- `crates/<revm-sim or similar>` — transaction/trade simulation via REVM + AlloyDB
+- `crates/mev_core` — shared primitives: REVM `BlockEnv`/`TxEnv` conversions from
+  Alloy RPC types, and reusable `sol!` ABI stubs (ERC20, Uniswap V2 pair) used by
+  every other crate.
+- `crates/mev_pool_watch` — stage 2: live reserve polling, `getReserves()` /
+  `token0()`/`token1()` calls, 2-leg/3-leg loop detection, price-gap and
+  profitability math. No REVM dependency.
+- `crates/mev_safety` — stage 3: cheap REVM buy/sell probe, contract-age and
+  holder-concentration checks, the safety-score gate before stage 4 runs.
+- `crates/mev_analysis` — stage 4: REVM-simulation support (transfer decoding,
+  balance-delta computation, token metadata) for exact trade/transaction
+  simulation via REVM + AlloyDB.
+- `crates/mev_cli` — binary wiring (currently a standalone profit-math demo;
+  becoming the real CLI entry point is separate, tracked work).
 
-(Update this section with real crate names as they solidify — don't let it drift
-from the actual `Cargo.toml` workspace members.)
+`mev_pool_watch` and `mev_safety` don't exist yet as of this writing — see
+`ARCHITECTURE.md` for their planned shape. Keep this section from drifting once
+they land.
 
 ## Hard rules
 
