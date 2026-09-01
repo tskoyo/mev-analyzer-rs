@@ -18,3 +18,4 @@ serde_json = "1"
 mev-core = { path = "crates/mev_core" }
 mev-analysis = { path = "crates/mev_analysis" }
 mev-dune = { path = "crates/mev_dune" }
+mev-pool-watch = { path = "crates/mev_pool_watch" }
