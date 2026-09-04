@@ -27,7 +27,11 @@ where
     Ok(results)
 }
 
-async fn fetch_one<P>(provider: &P, pool: &PoolMeta, block_number: u64) -> eyre::Result<PoolSnapshot>
+async fn fetch_one<P>(
+    provider: &P,
+    pool: &PoolMeta,
+    block_number: u64,
+) -> eyre::Result<PoolSnapshot>
 where
     P: Provider + Clone,
 {

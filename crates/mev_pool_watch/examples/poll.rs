@@ -1,17 +1,26 @@
 //! Bridges Stage 1 (Dune) into Stage 2 (live RPC confirmation): fetches
-//! candidate pools from Dune, polls their live reserves atomically per
-//! block, and runs 2-leg/3-leg loop detection + profitability math.
+//! candidate pools from Dune across every chain it returns, and for each
+//! chain you've configured an RPC endpoint for, polls live reserves
+//! atomically per block and runs 2-leg/3-leg loop detection + profitability
+//! math. Chains without a configured RPC are skipped, not silently dropped
+//! or defaulted to some other chain -- a pool's reserves can only ever be
+//! read from the chain it actually lives on.
 //!
 //! Generalized replacement for the old hardcoded-two-pool prototype
 //! (mev_analysis/examples/arbitrage.rs) -- pool addresses now come from a
-//! real Dune query instead of two `const Address`.
+//! real Dune query instead of two `const Address`, and RPC dispatch follows
+//! Dune's own `blockchain` column per candidate instead of one hardcoded
+//! chain.
 //!
-//! Requires DUNE_API_KEY, DUNE_QUERY_ID, and BNB_RPC_URL (Stage 1's initial
-//! chain scope -- see ARCHITECTURE.md) in the environment or a .env file.
+//! Requires DUNE_API_KEY, DUNE_QUERY_ID, and one `{CHAIN}_RPC_URL` per chain
+//! you want covered (e.g. `BNB_RPC_URL`, `ETHEREUM_RPC_URL` -- uppercased
+//! from Dune's `blockchain` value) in the environment or a .env file.
 //!
 //! No connector pools are configured below, so this run will only ever
 //! surface 2-leg candidates -- see `ConnectorPools`/ARCHITECTURE.md for why
-//! those addresses must be verified by hand, not guessed.
+//! those addresses must be verified by hand, not guessed, and note that a
+//! connector is inherently chain-specific (WBNB/BUSD only means something
+//! on bnb, WETH/USDC only on ethereum, etc).
 
 use alloy::primitives::Address;
 use alloy::providers::ProviderBuilder;
@@ -22,8 +31,6 @@ use mev_pool_watch::{
 };
 use std::collections::HashMap;
 
-const CHAIN: &str = "bnb";
-
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
     dotenv::dotenv().ok();
@@ -31,105 +38,125 @@ async fn main() -> eyre::Result<()> {
     let query_id: u64 = std::env::var("DUNE_QUERY_ID")
         .map_err(|_| eyre::eyre!("set DUNE_QUERY_ID to the saved query's numeric id"))?
         .parse()?;
-    let rpc_url = std::env::var("BNB_RPC_URL")
-        .map_err(|_| eyre::eyre!("set BNB_RPC_URL, e.g. https://bsc-dataseed.binance.org"))?;
 
     let dune = DuneClient::from_env()?;
     let params = CandidateQueryParams::default().to_query_parameters();
 
     println!("fetching stage 1 candidates from dune...");
+    let time_since_started = std::time::Instant::now();
     let candidates: Vec<PoolCandidate> = dune.run_query_with_params(query_id, &params).await?;
+    let elapsed = time_since_started.elapsed();
 
-    let candidates: Vec<PoolCandidate> = candidates
-        .into_iter()
-        .filter(|c| c.blockchain == CHAIN)
-        .collect();
-    println!("{} candidates on {CHAIN}\n", candidates.len());
+    println!(
+        "fetched {} candidates from dune in {:.2?}",
+        candidates.len(),
+        elapsed
+    );
+    println!("{} candidates across all chains\n", candidates.len());
 
-    let provider = ProviderBuilder::new().connect_http(rpc_url.parse()?);
-
-    // Key on token_address, not symbol -- Dune's distinct_addresses = 1
-    // filter already guarantees one contract per symbol/chain, but keying
-    // on the address here costs nothing and removes any doubt.
-    let mut by_token: HashMap<Address, Vec<PoolCandidate>> = HashMap::new();
+    let mut by_chain: HashMap<String, Vec<PoolCandidate>> = HashMap::new();
     for c in candidates {
-        by_token.entry(c.token_address).or_default().push(c);
+        by_chain.entry(c.blockchain.clone()).or_default().push(c);
     }
 
     let mut any_candidates = false;
 
-    for (token, rows) in &by_token {
-        if rows.len() < 2 {
-            continue; // need at least two pools to compare
+    for (chain, rows) in &by_chain {
+        let env_var = format!("{}_RPC_URL", chain.to_uppercase());
+        let rpc_url = match std::env::var(&env_var) {
+            Ok(url) => url,
+            Err(_) => {
+                println!(
+                    "skipping {chain} ({} candidates): {env_var} not set",
+                    rows.len()
+                );
+                continue;
+            }
+        };
+
+        println!("--- {chain} ({} candidates) ---", rows.len());
+        let provider = ProviderBuilder::new().connect_http(rpc_url.parse()?);
+        println!("  connected to {chain} RPC, polling live reserves...");
+
+        let mut by_token: HashMap<Address, Vec<&PoolCandidate>> = HashMap::new();
+        for c in rows {
+            by_token.entry(c.token_address).or_default().push(c);
         }
 
-        let pools: Vec<PoolMeta> = rows
-            .iter()
-            .map(|r| PoolMeta {
-                address: r.pool_address,
-                // Dune's output doesn't carry the DEX/project name yet
-                // (dune/candidates.sql's final SELECT would need a `project`
-                // column added), so fee_bps is a flat 30 (0.30%) guess for
-                // every pool here -- fine for Stage 2's approximate model,
-                // but a real per-DEX fee lookup is a worthwhile follow-up.
-                dex: "unknown".to_string(),
-                fee_bps: 30,
-            })
-            .collect();
+        for (token, token_rows) in &by_token {
+            if token_rows.len() < 2 {
+                continue; // need at least two pools to compare
+            }
 
-        let results = fetch_snapshots_at_current_block(&provider, &pools).await?;
-        let snapshots: Vec<_> = results
-            .into_iter()
-            .filter_map(|r| match r {
-                Ok(s) => Some(s),
-                Err(e) => {
-                    eprintln!("  pool fetch failed: {e}");
-                    None
-                }
-            })
-            .collect();
+            let pools: Vec<PoolMeta> = token_rows
+                .iter()
+                .map(|r| PoolMeta {
+                    address: r.pool_address,
+                    dex: "unknown".to_string(),
+                    fee_bps: 30,
+                })
+                .collect();
 
-        if snapshots.len() < 2 {
-            continue;
-        }
+            let results = fetch_snapshots_at_current_block(&provider, &pools).await?;
+            let snapshots: Vec<_> = results
+                .into_iter()
+                .filter_map(|r| match r {
+                    Ok(s) => Some(s),
+                    Err(e) => {
+                        eprintln!("  pool fetch failed: {e}");
+                        None
+                    }
+                })
+                .collect();
 
-        let mut tokens: Vec<Address> = snapshots
-            .iter()
-            .flat_map(|s| [s.token0, s.token1])
-            .collect();
-        tokens.sort();
-        tokens.dedup();
-        let decimals = fetch_decimals_for(&provider, &tokens).await?;
+            if snapshots.len() < 2 {
+                continue;
+            }
 
-        // No connectors configured -- see module doc. Extend this map with
-        // verified addresses to enable 3-leg detection.
-        let connectors = ConnectorPools::new();
+            let mut tokens: Vec<Address> = snapshots
+                .iter()
+                .flat_map(|s| [s.token0, s.token1])
+                .collect();
+            tokens.sort();
+            tokens.dedup();
+            let decimals = fetch_decimals_for(&provider, &tokens).await?;
 
-        let symbol = &rows[0].symbol;
-        let found = detect_candidates(*token, &snapshots, &decimals, &connectors, 0.0);
+            let connectors = connectors_for_chain(chain);
 
-        if found.is_empty() {
-            continue;
-        }
-        any_candidates = true;
+            let symbol = &token_rows[0].symbol;
+            let found = detect_candidates(*token, &snapshots, &decimals, &connectors, 0.0);
 
-        println!("{symbol} ({token}):");
-        for c in &found {
-            println!(
-                "  {:?} gap={:.1}bps opt_in={:.6} gross={:.6} net={:.6} block={}",
-                c.loop_kind,
-                c.gap_bps,
-                c.estimated_optimal_input,
-                c.estimated_gross_profit,
-                c.estimated_net_profit,
-                c.block_number
-            );
+            if found.is_empty() {
+                continue;
+            }
+            any_candidates = true;
+
+            println!("{symbol} ({token}):");
+            for c in &found {
+                println!(
+                    "  {:?} gap={:.1}bps opt_in={:.6} gross={:.6} net={:.6} block={}",
+                    c.loop_kind,
+                    c.gap_bps,
+                    c.estimated_optimal_input,
+                    c.estimated_gross_profit,
+                    c.estimated_net_profit,
+                    c.block_number
+                );
+            }
         }
     }
 
     if !any_candidates {
-        println!("no candidates detected this cycle");
+        println!("\nno candidates detected this cycle");
     }
 
     Ok(())
+}
+
+/// Connector pools are inherently chain-specific -- a WBNB/BUSD address
+/// means nothing on ethereum, and vice versa. None are populated yet (see
+/// ARCHITECTURE.md's "multi-chain connector list" out-of-scope note); add
+/// verified addresses per chain here once confirmed.
+fn connectors_for_chain(_chain: &str) -> ConnectorPools {
+    ConnectorPools::new()
 }

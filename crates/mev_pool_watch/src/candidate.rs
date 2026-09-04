@@ -18,8 +18,7 @@ pub struct PoolLeg {
 }
 
 /// A detected, priced, but not-yet-verified arbitrage loop -- a lead, not a
-/// verdict. Everything here is an estimate from Stage 2's approximate
-/// spot-price model; Stage 3 (safety) and Stage 4 (REVM) turn it into one.
+/// verdict.
 #[derive(Debug, Clone)]
 pub struct ArbCandidate {
     pub legs: Vec<PoolLeg>,
