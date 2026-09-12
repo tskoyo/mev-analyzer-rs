@@ -13,8 +13,8 @@ pub struct CandidateQueryParams {
 impl Default for CandidateQueryParams {
     fn default() -> Self {
         Self {
-            start_month: "2026-08-01".to_string(),
-            lookback_days: 30,
+            start_month: "2026-09-01".to_string(),
+            lookback_days: 5,
             excluded_symbols: [
                 "WETH", "ETH", "USDC", "USDT", "DAI", "WBTC", "WBNB", "BNB", "WMATIC", "WAVAX",
                 "PAXG",
