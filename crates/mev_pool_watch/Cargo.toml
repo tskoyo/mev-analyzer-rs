@@ -9,6 +9,8 @@ tokio.workspace = true
 dotenv.workspace = true
 eyre.workspace = true
 mev-core.workspace = true
+sqlx.workspace = true
+dashmap.workspace = true
 
 [dev-dependencies]
 mev-dune.workspace = true

@@ -13,6 +13,8 @@ anyhow = "1.0.104"
 reqwest = { version = "0.12", features = ["json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sqlx = { version = "0.8", default-features = false, features = ["sqlite", "runtime-tokio"] }
+dashmap = "6"
 
 # Internal dependencies
 mev-core = { path = "crates/mev_core" }

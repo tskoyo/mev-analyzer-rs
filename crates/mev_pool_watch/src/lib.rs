@@ -5,6 +5,7 @@ pub mod economics;
 pub mod gap;
 pub mod grouping;
 pub mod pool;
+pub mod pool_token_cache;
 pub mod reserves;
 pub mod token_decimals;
 
@@ -14,5 +15,6 @@ pub use detect::detect_candidates;
 pub use economics::AmmLeg;
 pub use grouping::TokenPairKey;
 pub use pool::{PoolMeta, PoolSnapshot};
+pub use pool_token_cache::PoolTokenCache;
 pub use reserves::fetch_snapshots_at_current_block;
 pub use token_decimals::fetch_decimals_for;
