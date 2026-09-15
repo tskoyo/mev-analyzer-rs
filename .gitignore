@@ -1,3 +1,4 @@
 /target
 .env
 pool_token_cache.db
+mevlog-queries.sql
