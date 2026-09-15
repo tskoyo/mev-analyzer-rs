@@ -72,6 +72,7 @@ impl PoolTokenCache {
         P: Provider + Clone,
     {
         self.resolve_with(pool, || async {
+            println!("cache miss for pool {pool:?}, fetching token0/token1 from chain...");
             let pair = IUniswapV2Pair::new(pool, provider);
             let token0 = pair.token0().call().await?;
             let token1 = pair.token1().call().await?;
@@ -97,6 +98,7 @@ impl PoolTokenCache {
         Fut: std::future::Future<Output = eyre::Result<(Address, Address)>>,
     {
         if let Some(tokens) = self.get(pool) {
+            println!("cache hit for pool {pool:?}, returning token0/token1 from memory...");
             return Ok(tokens);
         }
 
