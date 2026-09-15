@@ -71,25 +71,48 @@ impl PoolTokenCache {
     where
         P: Provider + Clone,
     {
+        self.resolve_with(pool, || async {
+            let pair = IUniswapV2Pair::new(pool, provider);
+            let token0 = pair.token0().call().await?;
+            let token1 = pair.token1().call().await?;
+            Ok((token0, token1))
+        })
+        .await
+    }
+
+    /// Cache-aside logic shared by `resolve`, with the on-chain fetch
+    /// injected as a closure -- lets tests exercise the caching behavior
+    /// (hit skips the fetch entirely, miss fetches once and persists to both
+    /// SQLite and memory) without a live `Provider`. `resolve` itself is
+    /// exercised against a real chain via `examples/`, matching how every
+    /// other RPC-dependent path in this crate is validated (see CLAUDE.md's
+    /// validation discipline).
+    async fn resolve_with<F, Fut>(
+        &self,
+        pool: Address,
+        fetch: F,
+    ) -> eyre::Result<(Address, Address)>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = eyre::Result<(Address, Address)>>,
+    {
         if let Some(tokens) = self.get(pool) {
             return Ok(tokens);
         }
 
-        let pair = IUniswapV2Pair::new(pool, provider);
-        let token0 = pair.token0().call().await?;
-        let token1 = pair.token1().call().await?;
+        let tokens = fetch().await?;
 
         sqlx::query(
             "INSERT OR IGNORE INTO pool_tokens (pool_address, token0, token1) VALUES (?, ?, ?)",
         )
         .bind(pool.to_string())
-        .bind(token0.to_string())
-        .bind(token1.to_string())
+        .bind(tokens.0.to_string())
+        .bind(tokens.1.to_string())
         .execute(&self.db)
         .await?;
 
-        self.tokens.insert(pool, (token0, token1));
-        Ok((token0, token1))
+        self.tokens.insert(pool, tokens);
+        Ok(tokens)
     }
 }
 
@@ -103,9 +126,7 @@ mod tests {
 
     #[tokio::test]
     async fn resolved_pools_survive_a_reopen() {
-        let dir = std::env::temp_dir().join(format!("pool-token-cache-test-{}", uuid()));
-        let db_path = dir.to_str().unwrap().to_string();
-
+        let db_path = temp_db_path();
         let cache = PoolTokenCache::open(&db_path).await.unwrap();
         let pool = addr(1);
         assert_eq!(cache.get(pool), None);
@@ -118,13 +139,58 @@ mod tests {
             .await
             .unwrap();
 
-        // A fresh `open` must load what a prior instance (or a prior
-        // process) already persisted -- that's the entire point of writing
-        // through to SQLite instead of only caching in memory.
         let reopened = PoolTokenCache::open(&db_path).await.unwrap();
         assert_eq!(reopened.get(pool), Some((addr(2), addr(3))));
 
         std::fs::remove_file(&db_path).ok();
+    }
+
+    #[tokio::test]
+    async fn resolve_with_fetches_and_persists_on_a_miss() {
+        let db_path = temp_db_path();
+        let cache = PoolTokenCache::open(&db_path).await.unwrap();
+        let pool = addr(1);
+
+        let tokens = cache
+            .resolve_with(pool, || async { Ok((addr(2), addr(3))) })
+            .await
+            .unwrap();
+
+        assert_eq!(tokens, (addr(2), addr(3)));
+        assert_eq!(cache.get(pool), Some((addr(2), addr(3))));
+
+        let reopened = PoolTokenCache::open(&db_path).await.unwrap();
+        assert_eq!(reopened.get(pool), Some((addr(2), addr(3))));
+
+        std::fs::remove_file(&db_path).ok();
+    }
+
+    #[tokio::test]
+    async fn resolve_with_skips_the_fetch_on_a_hit() {
+        let db_path = temp_db_path();
+        let cache = PoolTokenCache::open(&db_path).await.unwrap();
+        let pool = addr(1);
+        cache.tokens.insert(pool, (addr(2), addr(3)));
+
+        // The whole point of the cache: a resolved pool must never trigger
+        // another eth_call. Panicking in the closure proves it wasn't run.
+        let tokens = cache
+            .resolve_with(pool, || async {
+                panic!("fetch should not run for an already-cached pool")
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(tokens, (addr(2), addr(3)));
+        std::fs::remove_file(&db_path).ok();
+    }
+
+    fn temp_db_path() -> String {
+        std::env::temp_dir()
+            .join(format!("pool-token-cache-test-{}", uuid()))
+            .to_str()
+            .unwrap()
+            .to_string()
     }
 
     fn uuid() -> u64 {
